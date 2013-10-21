@@ -3,6 +3,11 @@ fs     = require 'fs'
 xml2js = require 'xml2js'
 csv    = require 'csv'
 
+
+existsAsync = (path, callback) ->
+  fs.exists(path, (result) -> callback(null, result))
+
+
 USAGE = [
   "Usage: strings-to-gengo --export strings.txt strings.xml"
 
@@ -14,8 +19,8 @@ USAGE = [
   "  --import  Import data"
   "  --text <file-XX.txt>  Gengo text file #required #var(textFileTemplate)"
   "  --android-xml <strings.xml>  Android xml resource file with strings #list #var(androidXmlFiles)"
-  "  --vocabulary <vocabulary.csv>  Common vocabulary file exported from Google Docs #var(vocabularyCsvFile) #required"
-  "  --vocabulary-filter <regexp>  Regular expression to filter by the 'source' column of the vocabulary #var(vocabularyFilter) #required"
+  "  --vocabulary <vocabulary.csv>  Common vocabulary file exported from Google Docs #var(vocabularyCsvFile)"
+  "  --vocabulary-filter <regexp>  Regular expression to filter by the 'source' column of the vocabulary #var(vocabularyFilter)"
   "  --lang <lang>   Add this language #list #var(langs)"
 ]
 
@@ -48,7 +53,7 @@ class AndroidXmlFile
     @terms = []
 
   read: (_) ->
-    body = fs.readFileSync(@path, 'utf8')
+    body = fs.readFile(@path, 'utf8', _)
     result = xml2js.parseString(body, {explicitArray: yes}, _)
 
     for el in result?.resources?.string ? []
@@ -58,6 +63,47 @@ class AndroidXmlFile
         @entries.push(new StringEntry(this, key, origValue))
       else
         console.error("Skipped entry for key #{key}")
+
+  writeLocalized: (localizedPath, _) ->
+    entriesByKey = {}
+    for entry in @entries
+      entriesByKey[entry.key] = entry
+
+    body = fs.readFile(@path, 'utf8', _)
+
+    body = body.replace /// (<string([^>]+)>)(.*?)(</string>) ///g, (match, prefix, attrs, body, suffix) ->
+      unless m = attrs.match /// name="([a-z0-9_$]+)" ///i
+        console.error "  Cannot parse %j", match
+        return match
+
+      key = m[1]
+
+      unless entry = entriesByKey[key]
+        console.error "  No entry found for '%s': %s", key, body
+        return match
+
+      unless entry.translatedString
+        console.error "  No translation found for '%s': %s", key, body
+        return match
+
+      replacement = entry.translatedString
+      replacement = replacement.replace(/\n/g, "\\n")
+      replacement = replacement.replace(/'/g, "\\'")
+
+      if body.match /</
+        console.error "\n  Tag found in key '%s'\n  Original: %s\n  English: %s\n  Translated: %s\n", key, body, entry.shortOrigValue, replacement
+        return match
+
+      # console.log "  %s: %j => %j", key, body, replacement
+      return prefix + replacement + suffix
+
+    outputDir = Path.dirname(localizedPath)
+    if !existsAsync(outputDir, _)
+      fs.mkdir(outputDir, _)
+
+    fs.writeFile(localizedPath, body, _)
+
+
 
 class StringEntry
   constructor: (@file, @key, @origValue) ->
@@ -149,6 +195,57 @@ class Processor
       file = template.replace(/XX/g, lang)
       @exportStrings(file, lang, options, _)
 
+  loadTranslatedStrings: (file, lang, options, _) ->
+    origEntries = (f.entries for f in @files).reduce((a, b) -> a.concat(b))
+
+    origEntriesByKey = {}
+    for entry in origEntries
+      origEntriesByKey[entry.key] = entry
+
+    console.log("  Loading %s", file)
+    lines = fs.readFile(file, 'utf8', _).split("\n")
+
+    curEntry = null
+    translatedEntries = []
+    for line in lines
+      trimmed = line.trim()
+      continue if trimmed == ''
+
+      if m = trimmed.match ///^  \[\[\[  \s*  key \s* : \s*  ([a-z0-9_$]+)  \s*  \]\]\]  $///i
+        translatedEntries.push(curEntry) if curEntry
+        curEntry = { key: m[1], lines: [] }
+      else if m = trimmed.match ///^  \[\[\[  .*  \]\]\]  $///
+        #
+      else if curEntry
+        curEntry.lines.push(line)
+    translatedEntries.push(curEntry) if curEntry
+
+    for entry in translatedEntries
+      entry.translatedString = entry.lines.join("\n").trim()
+
+    for translatedEntry in translatedEntries
+      if origEntry = origEntriesByKey[translatedEntry.key]
+        origEntry.translatedString = translatedEntry.translatedString
+      else
+        console.error("  Unknown translated key in #{lang}: %j", translatedEntry.key)
+
+    for origEntry in origEntries
+      if !origEntry.translatedString
+        console.error("  Left untranslated to #{lang}: %j", origEntry.key)
+
+  importStrings: (file, lang, options, _) ->
+    @loadTranslatedStrings(file, lang, options, _)
+    for file in @files
+      localizedPath = file.path.replace(/// /values/ ///, "/values-#{lang}/")
+      console.log("Writing %s", localizedPath)
+      file.writeLocalized(localizedPath, _)
+
+  importStringsInLanguages: (template, langs, options, _) ->
+    for lang in langs
+      console.log("%s:", lang)
+      file = template.replace(/XX/g, lang)
+      @importStrings(file, lang, options, _)
+
 
 run = (_) ->
   options = require('dreamopt')(USAGE)
@@ -165,6 +262,8 @@ run = (_) ->
 
   if options.export
     processor.exportStringsInLanguages(options.textFileTemplate, options.langs, options, _)
+  else if options.import
+    processor.importStringsInLanguages(options.textFileTemplate, options.langs, options, _)
 
 run (err) ->
   throw err if err
