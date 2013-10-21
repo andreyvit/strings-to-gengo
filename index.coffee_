@@ -1,0 +1,171 @@
+Path   = require 'path'
+fs     = require 'fs'
+xml2js = require 'xml2js'
+csv    = require 'csv'
+
+USAGE = [
+  "Usage: strings-to-gengo --export strings.txt strings.xml"
+
+  "Arguments:"
+  "  <strings.xml>  Android strings file #var(androidXmlFile)"
+
+  "Options:"
+  "  --export  Export data"
+  "  --import  Import data"
+  "  --text <file-XX.txt>  Gengo text file #required #var(textFileTemplate)"
+  "  --android-xml <strings.xml>  Android xml resource file with strings #list #var(androidXmlFiles)"
+  "  --vocabulary <vocabulary.csv>  Common vocabulary file exported from Google Docs #var(vocabularyCsvFile) #required"
+  "  --vocabulary-filter <regexp>  Regular expression to filter by the 'source' column of the vocabulary #var(vocabularyFilter) #required"
+  "  --lang <lang>   Add this language #list #var(langs)"
+]
+
+PREFIX = """
+[[[ IMPORTANT: The results of this translation will be processed automatically. ]]]
+[[[ IMPORTANT: Please translate entries inline, keeping the comments. ]]]
+[[[ IMPORTANT: Please don't reorder or remove entries. ]]]
+
+[[[ NOTE: You're translating user inferface strings for an Android app. ]]]
+[[[ NOTE: Sometimes, key names will give you a hint about where the strings are used. ]]]
+
+[[[ IMPORTANT: Please keep the capitalization of the original string, unless you have good reasons to do otherwise. ]]]
+
+[[[ IMPORTANT: Please don't translate our brand names (Ascendo, VidaLingua, VidaLingua Dictionary, Dictionary+). ]]]
+
+[[[ IMPORTANT: Some strings contain substitution keys like {DATE}, {X} or %2$d — please keep them intact, but put them in the proper place. ]]]
+
+[[[
+IMPORTANT: Please use the following standard translations of common Android terms (but adjust them according to the context):
+
+<vocab>
+
+]]]
+"""
+
+class AndroidXmlFile
+  constructor: (@path) ->
+    @name = Path.basename(@path)
+    @entries = []
+    @terms = []
+
+  read: (_) ->
+    body = fs.readFileSync(@path, 'utf8')
+    result = xml2js.parseString(body, {explicitArray: yes}, _)
+
+    for el in result?.resources?.string ? []
+      key = el.$.name?.trim()
+      origValue = el._?.trim()
+      if key and origValue
+        @entries.push(new StringEntry(this, key, origValue))
+      else
+        console.error("Skipped entry for key #{key}")
+
+class StringEntry
+  constructor: (@file, @key, @origValue) ->
+    @origValue = @origValue.replace(/\\'/g, "'")
+    @origValue = @origValue.replace(/\\n\n/g, "\n")
+    @origValue = @origValue.replace(/\\n\\n\n\n/g, "\n\n")
+    @origValue = @origValue.replace(/\\n/g, "")
+
+    @shortOrigValue = @origValue.replace(/\n/g, "  ")
+
+    @wordCount = @origValue.split(/\s+/).length
+
+
+class Processor
+  constructor: (@options) ->
+    @files = []
+    @terms = []
+    @vocabularyFilter = null
+
+  addStringsFile: (file) ->
+    @files.push(file)
+
+  loadVocabularyFile: (filePath, callback) ->
+    data = fs.readFileSync(filePath, 'utf8')
+
+    headers = null
+    csv()
+      .from(data)
+      .on 'record', (row, index) =>
+        if index == 0
+          headers = row
+        else if (row.length == headers.length) and row[0]
+          rec = {}
+          for cell, colIndex in row
+            rec[headers[colIndex]] = cell
+          if !!rec.en
+            @addTerm(rec)
+      .on 'end', =>
+        callback(null)
+
+  addTerm: (rec) ->
+    @terms.push(rec)
+
+  loadAppFiles: (_) ->
+    for file in @files
+      console.log("Loading %s", file.path)
+      file.read(_)
+      file.wordCount = (e.wordCount for e in file.entries).reduce((a, b) -> a + b)
+
+    report = {}
+    for file in @files
+      report[file.name] = {
+        entryCount: file.entries.length
+        wordCount:  file.wordCount
+      }
+    report.wordCount = (f.wordCount for f in @files).reduce((a, b) -> a + b)
+    console.log "report = " + JSON.stringify(report, null, 2)
+
+  exportStrings: (file, lang, options, _) ->
+    filter = ///#{options.vocabularyFilter}///i
+
+    allEntries = (f.entries for f in @files).reduce((a, b) -> a.concat(b))
+    allEntryLines =
+      for entry in allEntries
+        "[[[ key: #{entry.key} ]]]\n[[[ English: #{entry.shortOrigValue} ]]]\n#{entry.origValue}"
+
+    vocabTerms = []
+    vocabHash = {}
+
+    for term in @terms
+      if !!term[lang] and term.source.match(filter)
+        vocabTerms.push(term) unless vocabHash.hasOwnProperty(term.en)
+        vocabHash[term.en] = term[lang]
+
+    vocabLines = []
+    for term in vocabTerms
+      line = "• <en> — <xx>".replace('<en>', term.en).replace('<xx>', vocabHash[term.en])
+      vocabLines.push(line)
+      console.log "  %s", line
+
+    text = [PREFIX].concat(allEntryLines).join("\n\n") + "\n"
+    text = text.replace('<vocab>', vocabLines.join("\n"))
+    fs.writeFile(file, text, _)
+    console.log("  %s saved.", file)
+
+  exportStringsInLanguages: (template, langs, options, _) ->
+    for lang in langs
+      console.log("%s:", lang)
+      file = template.replace(/XX/g, lang)
+      @exportStrings(file, lang, options, _)
+
+
+run = (_) ->
+  options = require('dreamopt')(USAGE)
+  console.log "options = %j", options
+
+  processor = new Processor(options)
+  for file in options.androidXmlFiles
+    processor.addStringsFile(new AndroidXmlFile(file))
+
+  if options.vocabularyCsvFile
+    processor.loadVocabularyFile(options.vocabularyCsvFile, _)
+
+  processor.loadAppFiles(_)
+
+  if options.export
+    processor.exportStringsInLanguages(options.textFileTemplate, options.langs, options, _)
+
+run (err) ->
+  throw err if err
+

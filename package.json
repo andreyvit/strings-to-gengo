@@ -1,0 +1,9 @@
+{
+  "name": "strings-to-gengo",
+  "version": "0.0.0",
+  "dependencies": {
+    "xml2js": "~0.2.8",
+    "dreamopt": "~0.8.0",
+    "csv": "~0.3.6"
+  }
+}
