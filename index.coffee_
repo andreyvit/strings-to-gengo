@@ -22,6 +22,7 @@ USAGE = [
   "  --vocabulary <vocabulary.csv>  Common vocabulary file exported from Google Docs #var(vocabularyCsvFile)"
   "  --vocabulary-filter <regexp>  Regular expression to filter by the 'source' column of the vocabulary #var(vocabularyFilter)"
   "  --lang <lang>   Add this language #list #var(langs)"
+  "  --keys <keys>   A comma-separated list of keys to process"
 ]
 
 PREFIX = """
@@ -55,6 +56,8 @@ class AndroidXmlFile
   read: (_) ->
     body = fs.readFile(@path, 'utf8', _)
     result = xml2js.parseString(body, {explicitArray: yes}, _)
+
+    fs.writeFileSync(Path.basename(@path) + '.txt', JSON.stringify(result, null, 2))
 
     for el in result?.resources?.string ? []
       key = el.$.name?.trim()
@@ -110,7 +113,7 @@ class StringEntry
     @origValue = @origValue.replace(/\\'/g, "'")
     @origValue = @origValue.replace(/\\n\n/g, "\n")
     @origValue = @origValue.replace(/\\n\\n\n\n/g, "\n\n")
-    @origValue = @origValue.replace(/\\n/g, "")
+    @origValue = @origValue.replace(/\\n/g, "\n")
 
     @shortOrigValue = @origValue.replace(/\n/g, "  ")
 
@@ -166,6 +169,11 @@ class Processor
     filter = ///#{options.vocabularyFilter}///i
 
     allEntries = (f.entries for f in @files).reduce((a, b) -> a.concat(b))
+
+    if options.keys
+      keys = options.keys.split(',')
+      allEntries = (entry for entry in allEntries when entry.key in keys)
+
     allEntryLines =
       for entry in allEntries
         "[[[ key: #{entry.key} ]]]\n[[[ English: #{entry.shortOrigValue} ]]]\n#{entry.origValue}"
