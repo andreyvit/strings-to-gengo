@@ -1,3 +1,5 @@
+#!/usr/bin/env _coffee
+
 Path   = require 'path'
 fs     = require 'fs'
 xml2js = require 'xml2js'
@@ -11,14 +13,12 @@ existsAsync = (path, callback) ->
 USAGE = [
   "Usage: strings-to-gengo --export strings.txt strings.xml"
 
-  "Arguments:"
-  "  <strings.xml>  Android strings file #var(androidXmlFile)"
-
   "Options:"
   "  --export  Export data"
   "  --import  Import data"
   "  --text <file-XX.txt>  Gengo text file #required #var(textFileTemplate)"
   "  --android-xml <strings.xml>  Android xml resource file with strings #list #var(androidXmlFiles)"
+  "  --ios-strings <localization.strings>  Android xml resource file with strings #list #var(iosStringsFiles)"
   "  --vocabulary <vocabulary.csv>  Common vocabulary file exported from Google Docs #var(vocabularyCsvFile)"
   "  --vocabulary-filter <regexp>  Regular expression to filter by the 'source' column of the vocabulary #var(vocabularyFilter)"
   "  --lang <lang>   Add this language #list #var(langs)"
@@ -47,6 +47,23 @@ IMPORTANT: Please use the following standard translations of common Android term
 ]]]
 """
 
+IOS_STRINGS_REGEXP = ///
+  (                          # group 1: comments
+    (?:
+      /\* [^⇆]*? \*/              #   one comment
+      \s*
+    )*
+  )
+  "([^⇆]*?)"                    # group 2: key
+  \s* = \s*
+  "([^⇆]*?)"                    # group 3: value
+  \s* ;
+///g
+
+IOS_COMMENT_REGEXP = ///
+  /\* ([^⇆]*?) \*/
+///g
+
 class AndroidXmlFile
   constructor: (@path) ->
     @name = Path.basename(@path)
@@ -66,6 +83,9 @@ class AndroidXmlFile
         @entries.push(new StringEntry(this, key, origValue))
       else
         console.error("Skipped entry for key #{key}")
+
+  localizedPath: (lang) ->
+    @path.replace(/// /values/ ///, "/values-#{lang}/")
 
   writeLocalized: (localizedPath, _) ->
     entriesByKey = {}
@@ -107,9 +127,55 @@ class AndroidXmlFile
     fs.writeFile(localizedPath, body, _)
 
 
+class iOSStringsFile
+  constructor: (@path) ->
+    @name = Path.basename(@path)
+    @entries = []
+    @terms = []
+
+  read: (_) ->
+    body = fs.readFile(@path, 'utf8', _)
+
+    unmatchedBody = body.replace IOS_STRINGS_REGEXP, (fullMatch, comments, key, value) =>
+      lastComment = ''
+      unmatchedComments = comments.replace IOS_COMMENT_REGEXP, (fullComment, comment) =>
+        lastComment = comment
+        return ''
+      if unmatchedComments.trim().length > 0
+        throw new Error "Failed to parse comments; unparsed portion is:\n---\n#{unmatchedComments}\n---"
+
+      @entries.push(new StringEntry(this, key, value, lastComment))
+      return ''
+
+    if unmatchedBody.trim().length > 0
+      throw new Error "Failed to parse file; unparsed portion is:\n---\n#{unmatchedBody}\n---"
+
+    undefined
+
+  localizedPath: (lang) ->
+    @path.replace(/// /en.lproj/ ///, "/#{lang}.lproj/")
+
+  writeLocalized: (localizedPath, _) ->
+    entriesByKey = {}
+    for entry in @entries
+      entriesByKey[entry.key] = entry
+
+    strings = []
+    for entry in @entries
+      strings.push "\"#{entry.key}\" = \"#{entry.translatedString}\";\n"
+
+    body = strings.join('')
+
+    outputDir = Path.dirname(localizedPath)
+    if !existsAsync(outputDir, _)
+      fs.mkdir(outputDir, _)
+
+    fs.writeFile(localizedPath, body, _)
+
+
 
 class StringEntry
-  constructor: (@file, @key, @origValue) ->
+  constructor: (@file, @key, @origValue, @comment='') ->
     @origValue = @origValue.replace(/\\'/g, "'")
     @origValue = @origValue.replace(/\\n\n/g, "\n")
     @origValue = @origValue.replace(/\\n\\n\n\n/g, "\n\n")
@@ -154,7 +220,7 @@ class Processor
     for file in @files
       console.log("Loading %s", file.path)
       file.read(_)
-      file.wordCount = (e.wordCount for e in file.entries).reduce((a, b) -> a + b)
+      file.wordCount = (e.wordCount for e in file.entries).reduce(((a, b) -> a + b), 0)
 
     report = {}
     for file in @files
@@ -162,13 +228,13 @@ class Processor
         entryCount: file.entries.length
         wordCount:  file.wordCount
       }
-    report.wordCount = (f.wordCount for f in @files).reduce((a, b) -> a + b)
+    report.wordCount = (f.wordCount for f in @files).reduce(((a, b) -> a + b), 0)
     console.log "report = " + JSON.stringify(report, null, 2)
 
   exportStrings: (file, lang, options, _) ->
     filter = ///#{options.vocabularyFilter}///i
 
-    allEntries = (f.entries for f in @files).reduce((a, b) -> a.concat(b))
+    allEntries = (f.entries for f in @files).reduce(((a, b) -> a.concat(b)), [])
 
     if options.keys
       keys = options.keys.split(',')
@@ -204,7 +270,7 @@ class Processor
       @exportStrings(file, lang, options, _)
 
   loadTranslatedStrings: (file, lang, options, _) ->
-    origEntries = (f.entries for f in @files).reduce((a, b) -> a.concat(b))
+    origEntries = (f.entries for f in @files).reduce(((a, b) -> a.concat(b)), [])
 
     origEntriesByKey = {}
     for entry in origEntries
@@ -220,6 +286,9 @@ class Processor
       continue if trimmed == ''
 
       if m = trimmed.match ///^  \[\[\[  \s*  key \s* : \s*  ([a-z0-9_$]+)  \s*  \]\]\]  $///i
+        translatedEntries.push(curEntry) if curEntry
+        curEntry = { key: m[1], lines: [] }
+      else if m = trimmed.match ///^  \[\[\[  \s*  English: \s (.*) \s \]\]\]  $///i
         translatedEntries.push(curEntry) if curEntry
         curEntry = { key: m[1], lines: [] }
       else if m = trimmed.match ///^  \[\[\[  .*  \]\]\]  $///
@@ -241,10 +310,14 @@ class Processor
       if !origEntry.translatedString
         console.error("  Left untranslated to #{lang}: %j", origEntry.key)
 
+    console.log("  Done loading %s", file)
+
   importStrings: (file, lang, options, _) ->
     @loadTranslatedStrings(file, lang, options, _)
+    console.log("importStrings %s", lang)
+    console.log("importStrings @files = %s", @files.length)
     for file in @files
-      localizedPath = file.path.replace(/// /values/ ///, "/values-#{lang}/")
+      localizedPath = file.localizedPath(lang)
       console.log("Writing %s", localizedPath)
       file.writeLocalized(localizedPath, _)
 
@@ -260,8 +333,10 @@ run = (_) ->
   console.log "options = %j", options
 
   processor = new Processor(options)
-  for file in options.androidXmlFiles
+  for file in options.androidXmlFiles or []
     processor.addStringsFile(new AndroidXmlFile(file))
+  for file in options.iosStringsFiles or []
+    processor.addStringsFile(new iOSStringsFile(file))
 
   if options.vocabularyCsvFile
     processor.loadVocabularyFile(options.vocabularyCsvFile, _)
