@@ -21,8 +21,7 @@ USAGE = [
   "  --ios-strings <localization.strings>  Android xml resource file with strings #list #var(iosStringsFiles)"
   "  --vocabulary <vocabulary.csv>  Common vocabulary file exported from Google Docs #var(vocabularyCsvFile)"
   "  --vocabulary-filter <regexp>  Regular expression to filter by the 'source' column of the vocabulary #var(vocabularyFilter)"
-  "  --lang <lang>   Add this language #list #var(langs)"
-  "  --keys <keys>   A comma-separated list of keys to process"
+  "  --langs <langs>   Languages (comma-separated) #var(langs)"
 ]
 
 PREFIX = """
@@ -64,10 +63,34 @@ IOS_COMMENT_REGEXP = ///
   /\* ([^⇆]*?) \*/
 ///g
 
-class AndroidXmlFile
+
+class StringsFile
+
+  updateStatistics: ->
+    @wordCount = (e.wordCount for e in @entries).reduce(((a, b) -> a + b), 0)
+    @entryCount = @entries.length
+
+
+class TranslatableFile extends StringsFile
+
+  updateStatistics: ->
+    super()
+    @unmatchedEntryCount = @entries.filter((e) -> !e.baseEntry).length
+    @previouslyTranslatedEntryCount = @entries.filter((e) -> e.isPreviouslyTranslated()).length
+    @gengoTranslatedEntryCount = @entries.filter((e) -> e.isGengoTranslated()).length
+    @gengoNewlyTranslatedEntryCount = @entries.filter((e) -> e.isNewlyTranslated()).length
+    @gengoRetranslatedEntryCount = @entries.filter((e) -> e.isRetranslated()).length
+    @gengoModifiedEntryCount = @entries.filter((e) -> e.isModified()).length
+    @gengoMatchedEntryCount = @entries.filter((e) -> e.isGengoMatched()).length
+    @translatedEntryCount = @entries.filter((e) -> e.isTranslated()).length
+    @untranslatedEntryCount = @entries.filter((e) -> !e.isTranslated()).length
+
+
+class AndroidXmlFile extends TranslatableFile
   constructor: (@path) ->
     @name = Path.basename(@path)
     @entries = []
+    @entriesByKey = {}
     @terms = []
 
   read: (_) ->
@@ -78,9 +101,9 @@ class AndroidXmlFile
 
     for el in result?.resources?.string ? []
       key = el.$.name?.trim()
-      origValue = el._?.trim()
-      if key and origValue
-        @entries.push(new StringEntry(this, key, origValue))
+      value = el._?.trim()
+      if key and value
+        @entries.push(new TranslatableEntry(this, key, value))
       else
         console.error("Skipped entry for key #{key}")
 
@@ -114,7 +137,7 @@ class AndroidXmlFile
       replacement = replacement.replace(/'/g, "\\'")
 
       if body.match /</
-        console.error "\n  Tag found in key '%s'\n  Original: %s\n  English: %s\n  Translated: %s\n", key, body, entry.shortOrigValue, replacement
+        console.error "\n  Tag found in key '%s'\n  Original: %s\n  English: %s\n  Translated: %s\n", key, body, entry.shortValue, replacement
         return match
 
       # console.log "  %s: %j => %j", key, body, replacement
@@ -127,13 +150,49 @@ class AndroidXmlFile
     fs.writeFile(localizedPath, body, _)
 
 
-class iOSStringsFile
-  constructor: (@path) ->
+stringsEscape = (string) ->
+  string = string.replace(/(["\\])/g, '\\$1')
+  string = string.replace(/\n/g, '\\n')
+  return string
+
+stringsUnescape = (string) ->
+  string = string.replace(/\\(["\\])/g, '$1')
+  string = string.replace(/\\n/g, '\n')
+  return string
+
+
+class iOSStringsFileCluster
+  constructor: (basePath, languages) ->
+    @name = Path.basename(basePath)
+
+    @baseFile = new iOSStringsFile(this, basePath, 'en')
+    @localizedFiles = []
+    @localizedFilesByLang = {}
+    @files = [@baseFile]
+
+    basedir = Path.dirname(Path.dirname(basePath))
+    for lang in languages
+      path = Path.join(basedir, "#{lang}.lproj", @name)
+      file = new iOSStringsFile(this, path, lang)
+      @localizedFilesByLang[lang] = file
+      @localizedFiles.push(file)
+      @files.push(file)
+
+  lookupEntry: (key, lang) ->
+    @localizedFilesByLang[lang].lookupEntry(key)
+
+
+class iOSStringsFile extends TranslatableFile
+  constructor: (@cluster, @path, @lang) ->
     @name = Path.basename(@path)
     @entries = []
+    @entriesByKey = {}
     @terms = []
+    @exists = fs.existsSync(@path)
 
   read: (_) ->
+    return unless @exists
+
     body = fs.readFile(@path, 'utf8', _)
 
     unmatchedBody = body.replace IOS_STRINGS_REGEXP, (fullMatch, comments, key, value) =>
@@ -144,7 +203,7 @@ class iOSStringsFile
       if unmatchedComments.trim().length > 0
         throw new Error "Failed to parse comments; unparsed portion is:\n---\n#{unmatchedComments}\n---"
 
-      @entries.push(new StringEntry(this, key, value, lastComment))
+      @_addEntry(new TranslatableEntry(this, stringsUnescape(key), stringsUnescape(value), lastComment))
       return ''
 
     if unmatchedBody.trim().length > 0
@@ -152,8 +211,16 @@ class iOSStringsFile
 
     undefined
 
-  localizedPath: (lang) ->
-    @path.replace(/// /en.lproj/ ///, "/#{lang}.lproj/")
+
+  _addEntry: (entry) ->
+    @entries.push(entry)
+    @entriesByKey[entry.key] = entry
+
+  lookupEntry: (key) ->
+    unless @entriesByKey.hasOwnProperty(key)
+      @_addEntry(new TranslatableEntry(this, key, ''))
+    return @entriesByKey[key]
+
 
   writeLocalized: (localizedPath, _) ->
     entriesByKey = {}
@@ -161,8 +228,10 @@ class iOSStringsFile
       entriesByKey[entry.key] = entry
 
     strings = []
-    for entry in @entries
-      strings.push "\"#{entry.key}\" = \"#{entry.translatedString}\";\n"
+    for entry in @entries when entry.translatedString
+      escaped = stringsEscape(entry.translatedString)
+
+      strings.push "\"#{stringsEscape(entry.key)}\" = \"#{escaped}\";\n"
 
     body = strings.join('')
 
@@ -173,27 +242,155 @@ class iOSStringsFile
     fs.writeFile(localizedPath, body, _)
 
 
-
 class StringEntry
-  constructor: (@file, @key, @origValue, @comment='') ->
-    @origValue = @origValue.replace(/\\'/g, "'")
-    @origValue = @origValue.replace(/\\n\n/g, "\n")
-    @origValue = @origValue.replace(/\\n\\n\n\n/g, "\n\n")
-    @origValue = @origValue.replace(/\\n/g, "\n")
+  constructor: (@file, @key, @value, @comment='') ->
+    @value = @value.replace(/\\'/g, "'")
+    @value = @value.replace(/\\n\n/g, "\n")
+    @value = @value.replace(/\\n\\n\n\n/g, "\n\n")
+    @value = @value.replace(/\\n/g, "\n")
 
-    @shortOrigValue = @origValue.replace(/\n/g, "  ")
+    @shortValue = @value.replace(/\n/g, "  ")
 
-    @wordCount = @origValue.split(/\s+/).length
+    @wordCount = @value.split(/\s+/).length
+
+  _initialize: ->
+    @baseEntry = null
+
+  lookupEntryIn: (lang) ->
+    @file.cluster.lookupEntry(@key, lang)
+
+class TranslatableEntry extends StringEntry
+  _initialize: ->
+    @gengoEntry = null
+
+  isGengoTranslated: -> !!@gengoEntry
+  isPreviouslyTranslated: -> !!@value
+  isNewlyTranslated: -> @isGengoTranslated() && !@isPreviouslyTranslated()
+  isRetranslated: -> @isGengoTranslated() && @isPreviouslyTranslated() && (@gengoEntry.value != @value)
+  isGengoMatched: -> @isGengoTranslated() && @isPreviouslyTranslated() && (@gengoEntry.value == @value)
+  isModified: -> @isNewlyTranslated() || @isRetranslated()
+
+  getTranslatedEntry: -> @gengoEntry or (@value && this) or null
+  isTranslated: -> !!@getTranslatedEntry()
+
+class GengoEntry extends StringEntry
+  _initialize: ->
+    @translatedEntry = null
+
+
+class GengoFileCluster
+  constructor: (template, languages) ->
+    @filesByLang = {}
+    @files = []
+    @exists = fs.existsSync(@path)
+
+    for lang in languages
+      path = template.replace(/XX/g, lang)
+      file = new IncomingGengoFile(path, lang)
+      @filesByLang[lang] = file
+      @files.push(file)
+
+
+class IncomingGengoFile extends StringsFile
+  constructor: (@path, @lang) ->
+    @name = Path.basename(@path)
+    @entries = []
+    @exists = fs.existsSync(@path)
+    @outgoingFile = new OutgoingGengoFile(@path.replace(/\.txt$/, '-job.txt'), @lang)
+
+
+  updateStatistics: ->
+    super()
+    @matchedEntryCount = @entries.filter((e) -> !!e.translatedEntry).length
+    @unmatchedEntryCount = @entries.filter((e) -> !e.translatedEntry).length
+
+
+  read: (_) ->
+    return unless @exists
+
+    body = fs.readFile(@path, 'utf8', _)
+
+    body = body.replace ///  \[\[\[  [^⇆]*?  \]\]\]  ///g, (str) =>
+      if str.match ///^  \[\[\[  \s*  English: \s (.*) \s \]\]\]  $///i
+        str
+      else
+        ''
+
+    lines = body.split("\n")
+
+    curEntry = null
+    translatedEntries = []
+    for line in lines
+      trimmed = line.trim()
+      continue if trimmed == ''
+
+      translationSeen = no
+      if m = trimmed.match ///^  \[\[\[  \s*  key \s* : \s*  ([a-z0-9_$]+)  \s*  \]\]\]  $///i
+        translatedEntries.push(curEntry) if curEntry
+        curEntry = { key: m[1], lines: [] }
+        translationSeen = no
+      else if m = trimmed.match ///^  \[\[\[  \s*  English: \s (.*) \s \]\]\]  $///i
+        translatedEntries.push(curEntry) if curEntry
+        curEntry = { key: m[1], lines: [] }
+        translationSeen = no
+      else if m = trimmed.match ///^  \[\[\[  .*  \]\]\]  $///
+        if curEntry and translationSeen
+          translatedEntries.push(curEntry)
+          curEntry = null
+          translationSeen = no
+      else if curEntry
+        translationSeen = yes
+        curEntry.lines.push(line)
+    translatedEntries.push(curEntry) if curEntry
+
+    for entry in translatedEntries
+      key = stringsUnescape(entry.key)  # TODO: only in iOS!
+      translatedString = stringsUnescape(entry.lines.join("\n").trim())
+      @entries.push(new GengoEntry(this, key, translatedString))
+
+    return
+
+
+class OutgoingGengoFile extends StringsFile
+  constructor: (@path, @lang) ->
+    @name = Path.basename(@path)
+    @entries = null
+
+  write: (_) ->
+    # filter = ///#{options.vocabularyFilter}///i
+
+    allEntryLines =
+      for entry in @entries
+        "[[[ key: #{entry.key} ]]]\n[[[ English: #{entry.shortValue} ]]]\n#{entry.value}"
+
+    # # vocabTerms = []
+    # # vocabHash = {}
+
+    # # for term in @terms
+    # #   if !!term[lang] and term.source.match(filter)
+    # #     vocabTerms.push(term) unless vocabHash.hasOwnProperty(term.en)
+    # #     vocabHash[term.en] = term[lang]
+
+    vocabLines = []
+    # for term in vocabTerms
+    #   line = "• <en> — <xx>".replace('<en>', term.en).replace('<xx>', vocabHash[term.en])
+    #   vocabLines.push(line)
+    #   console.log "  %s", line
+
+    text = [PREFIX].concat(allEntryLines).join("\n\n") + "\n"
+    text = text.replace('<vocab>', vocabLines.join("\n"))
+    fs.writeFile(@path, text, _)
 
 
 class Processor
-  constructor: (@options) ->
-    @files = []
+  constructor: (@options, @langs) ->
+    @localizableFileClusters = []
+    @gengoCluster = null
     @terms = []
     @vocabularyFilter = null
 
-  addStringsFile: (file) ->
-    @files.push(file)
+  addStringsFileCluster: (file) ->
+    @localizableFileClusters.push(file)
 
   loadVocabularyFile: (filePath, callback) ->
     data = fs.readFileSync(filePath, 'utf8')
@@ -216,107 +413,95 @@ class Processor
   addTerm: (rec) ->
     @terms.push(rec)
 
-  loadAppFiles: (_) ->
-    for file in @files
-      console.log("Loading %s", file.path)
+
+  loadStringsFiles: (_) ->
+    console.log("\nLoading localization files")
+    for cluster in @localizableFileClusters
+      for file in cluster.files
+        console.log("  %s (%s)", file.name, file.lang)
+        file.read(_)
+        file.updateStatistics()
+        console.log("    %d words in %d entries", file.wordCount, file.entryCount)
+
+
+  loadGengoFiles: (_) ->
+    console.log("\nLoading Gengo files")
+    for file in @gengoCluster.files
+      console.log("  %s (%s)", file.name, file.lang)
       file.read(_)
-      file.wordCount = (e.wordCount for e in file.entries).reduce(((a, b) -> a + b), 0)
+      file.updateStatistics()
+      console.log("    %d words in %d entries", file.wordCount, file.entryCount)
 
-    report = {}
-    for file in @files
-      report[file.name] = {
-        entryCount: file.entries.length
-        wordCount:  file.wordCount
-      }
-    report.wordCount = (f.wordCount for f in @files).reduce(((a, b) -> a + b), 0)
-    console.log "report = " + JSON.stringify(report, null, 2)
 
-  exportStrings: (file, lang, options, _) ->
-    filter = ///#{options.vocabularyFilter}///i
+  matchStrings: () ->
+    console.log("\nMatching localizable strings to translations")
 
-    allEntries = (f.entries for f in @files).reduce(((a, b) -> a.concat(b)), [])
+    baseEntries = []
+    baseEntriesByKey = {}
+    for cluster in @localizableFileClusters
+      for entry in cluster.baseFile.entries
+        baseEntries.push(entry)
+        baseEntriesByKey[entry.key] = entry
 
-    if options.keys
-      keys = options.keys.split(',')
-      allEntries = (entry for entry in allEntries when entry.key in keys)
+    for cluster in @localizableFileClusters
+      for file in cluster.localizedFiles
+        for entry in file.entries
+          if baseEntriesByKey.hasOwnProperty(entry.key)
+            entry.baseEntry = baseEntriesByKey[entry.key]
 
-    allEntryLines =
-      for entry in allEntries
-        "[[[ key: #{entry.key} ]]]\n[[[ English: #{entry.shortOrigValue} ]]]\n#{entry.origValue}"
+    for gengoFile in @gengoCluster.files
+      for gengoEntry in gengoFile.entries
+        if baseEntriesByKey.hasOwnProperty(gengoEntry.key)
+          baseEntry = baseEntriesByKey[gengoEntry.key]
+          translatedEntry = baseEntry.lookupEntryIn(gengoFile.lang)
 
-    vocabTerms = []
-    vocabHash = {}
+          gengoEntry.baseEntry = baseEntry
+          gengoEntry.translatedEntry = translatedEntry
+          translatedEntry.gengoEntry = gengoEntry
 
-    for term in @terms
-      if !!term[lang] and term.source.match(filter)
-        vocabTerms.push(term) unless vocabHash.hasOwnProperty(term.en)
-        vocabHash[term.en] = term[lang]
+    @untranslatedEntriesByLang = {}
 
-    vocabLines = []
-    for term in vocabTerms
-      line = "• <en> — <xx>".replace('<en>', term.en).replace('<xx>', vocabHash[term.en])
-      vocabLines.push(line)
-      console.log "  %s", line
+    for lang in @langs
+      console.log("  %s", lang)
 
-    text = [PREFIX].concat(allEntryLines).join("\n\n") + "\n"
-    text = text.replace('<vocab>', vocabLines.join("\n"))
-    fs.writeFile(file, text, _)
-    console.log("  %s saved.", file)
+      gengoFile = @gengoCluster.filesByLang[lang]
+      gengoFile.updateStatistics()
+      console.log("    Gengo: %d matched, %d unmatched", gengoFile.matchedEntryCount, gengoFile.unmatchedEntryCount)
+
+      for cluster in @localizableFileClusters
+        file = cluster.localizedFilesByLang[lang]
+        file.updateStatistics()
+        console.log("    %s", file.name)
+        console.log("      previously translated: %d total, %d no longer relevant, %d retranslated", file.previouslyTranslatedEntryCount, file.unmatchedEntryCount, file.gengoRetranslatedEntryCount)
+        console.log("      Gengo: %d incoming, of those %d new, %d changed, %d same", file.gengoTranslatedEntryCount, file.gengoNewlyTranslatedEntryCount, file.gengoRetranslatedEntryCount, file.gengoMatchedEntryCount)
+        console.log("      now: %d translated, %d untranslated", file.translatedEntryCount, file.untranslatedEntryCount)
+
+      untranslatedEntries = []
+      for baseEntry in baseEntries
+        translatableEntry = baseEntry.lookupEntryIn(lang)
+        unless translatableEntry.isTranslated()
+          untranslatedEntries.push(baseEntry)
+
+      console.log("    %d untranslated entries", untranslatedEntries.length)
+
+      @untranslatedEntriesByLang[lang] = untranslatedEntries
+
 
   exportStringsInLanguages: (template, langs, options, _) ->
+    console.log("\nWriting Gengo files")
     for lang in langs
-      console.log("%s:", lang)
-      file = template.replace(/XX/g, lang)
-      @exportStrings(file, lang, options, _)
+      console.log("  %s", lang)
 
-  loadTranslatedStrings: (file, lang, options, _) ->
-    origEntries = (f.entries for f in @files).reduce(((a, b) -> a.concat(b)), [])
-
-    origEntriesByKey = {}
-    for entry in origEntries
-      origEntriesByKey[entry.key] = entry
-
-    console.log("  Loading %s", file)
-    lines = fs.readFile(file, 'utf8', _).split("\n")
-
-    curEntry = null
-    translatedEntries = []
-    for line in lines
-      trimmed = line.trim()
-      continue if trimmed == ''
-
-      if m = trimmed.match ///^  \[\[\[  \s*  key \s* : \s*  ([a-z0-9_$]+)  \s*  \]\]\]  $///i
-        translatedEntries.push(curEntry) if curEntry
-        curEntry = { key: m[1], lines: [] }
-      else if m = trimmed.match ///^  \[\[\[  \s*  English: \s (.*) \s \]\]\]  $///i
-        translatedEntries.push(curEntry) if curEntry
-        curEntry = { key: m[1], lines: [] }
-      else if m = trimmed.match ///^  \[\[\[  .*  \]\]\]  $///
-        #
-      else if curEntry
-        curEntry.lines.push(line)
-    translatedEntries.push(curEntry) if curEntry
-
-    for entry in translatedEntries
-      entry.translatedString = entry.lines.join("\n").trim()
-
-    for translatedEntry in translatedEntries
-      if origEntry = origEntriesByKey[translatedEntry.key]
-        origEntry.translatedString = translatedEntry.translatedString
-      else
-        console.error("  Unknown translated key in #{lang}: %j", translatedEntry.key)
-
-    for origEntry in origEntries
-      if !origEntry.translatedString
-        console.error("  Left untranslated to #{lang}: %j", origEntry.key)
-
-    console.log("  Done loading %s", file)
+      gengoFile = @gengoCluster.filesByLang[lang]
+      outgoingFile = gengoFile.outgoingFile
+      outgoingFile.entries = @untranslatedEntriesByLang[lang]
+      console.log("    %s - %d entries", outgoingFile.name, outgoingFile.entries.length)
+      outgoingFile.write(_)
 
   importStrings: (file, lang, options, _) ->
-    @loadTranslatedStrings(file, lang, options, _)
     console.log("importStrings %s", lang)
-    console.log("importStrings @files = %s", @files.length)
-    for file in @files
+    console.log("importStrings @localizableFileClusters = %s", @localizableFileClusters.length)
+    for file in @localizableFileClusters
       localizedPath = file.localizedPath(lang)
       console.log("Writing %s", localizedPath)
       file.writeLocalized(localizedPath, _)
@@ -327,26 +512,39 @@ class Processor
       file = template.replace(/XX/g, lang)
       @importStrings(file, lang, options, _)
 
+  loadTranslatedStringsInLanguages: (template, langs, options, _) ->
+    console.log("\nLoading Gengo files")
+    for lang in langs
+      file = template.replace(/XX/g, lang)
+      console.log("  %s (%s)", Path.basename(file), lang)
+      @loadTranslatedStrings(file, lang, options, _)
+
 
 run = (_) ->
   options = require('dreamopt')(USAGE)
   console.log "options = %j", options
 
-  processor = new Processor(options)
-  for file in options.androidXmlFiles or []
-    processor.addStringsFile(new AndroidXmlFile(file))
+  langs = options.langs.split(',')
+
+  processor = new Processor(options, langs)
+  # for file in options.androidXmlFiles or []
+  #   processor.addStringsFileCluster(new AndroidXmlFile(file))
   for file in options.iosStringsFiles or []
-    processor.addStringsFile(new iOSStringsFile(file))
+    processor.addStringsFileCluster(new iOSStringsFileCluster(file, langs))
+
+  processor.gengoCluster = new GengoFileCluster(options.textFileTemplate, langs)
 
   if options.vocabularyCsvFile
     processor.loadVocabularyFile(options.vocabularyCsvFile, _)
 
-  processor.loadAppFiles(_)
+  processor.loadStringsFiles(_)
+  processor.loadGengoFiles(_)
+  processor.matchStrings()
 
   if options.export
-    processor.exportStringsInLanguages(options.textFileTemplate, options.langs, options, _)
+    processor.exportStringsInLanguages(options.textFileTemplate, langs, options, _)
   else if options.import
-    processor.importStringsInLanguages(options.textFileTemplate, options.langs, options, _)
+    processor.importStringsInLanguages(options.textFileTemplate, langs, options, _)
 
 run (err) ->
   throw err if err
