@@ -79,11 +79,28 @@ STUPID_COMMENTS = [
 ]
 
 
+compare = (a, b) ->
+  if a && !b
+    return -1
+  if !a && b
+    return 1
+  if !a && !b
+    return 0
+  if a < b
+    return -1
+  if a > b
+    return 1
+  return 0
+
+
 class StringsFile
 
   updateStatistics: ->
     @wordCount = (e.wordCount for e in @entries).reduce(((a, b) -> a + b), 0)
     @entryCount = @entries.length
+
+  sortByComments: ->
+    @entries.sort((a, b) -> compare(a.comment, b.comment))
 
 
 class TranslatableFile extends StringsFile
@@ -453,6 +470,7 @@ class Processor
       for file in cluster.files
         console.log("  %s", file.longerName)
         file.read(_)
+        file.sortByComments()
         file.updateStatistics()
         console.log("    %d words in %d entries", file.wordCount, file.entryCount)
 
