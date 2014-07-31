@@ -1,7 +1,17 @@
-Export example:
+Example:
 
-    _coffee index.coffee_ --export --text VidaLingua-Android-XX.txt --android-xml ~/dev/.../src/main/res/values/strings.xml --lang es --lang it --lang fr --lang de --lang pt --vocabulary-filter 'Android|translation' --vocabulary ~/Downloads/Vocabulary.csv
+    _coffee index._coffee --text ~/somewhere/gengo/gengo-XX.txt --ios-strings ~/dev/myapp/Localization/en.lproj/Localizable.strings --langs es,fr,it,de,pt --import
 
-Import example:
+Options:
 
-    _coffee index.coffee_ --import --text VidaLingua-Android-XX.txt --android-xml ~/dev/.../src/main/res/values/strings.xml --lang es --lang it --lang fr --lang de --lang pt
+* `--text ~/somewhere/gengo/gengo-XX.txt` — location of Gengo files; XX will be replaced by language name; '-job' will be appended for outgoing files, so e.g. gengo-fr-job.txt is a French strings to submit to Gengo, and gengo-fr.txt is where you should save the translation provided by Gengo
+
+* `--ios-strings ~/dev/myapp/Localization/en.lproj/Localizable.strings` — location of the base localization file(s)
+
+* `--langs es,fr,it,de,pt` — comma-separated list of languages to process
+
+* `--export` — use this option to export missing strings into Gengo job files
+
+* `--import` — use this option to import translations from Gengo txt files into strings files
+
+Run without `--import` and `--export` to preview the results.
