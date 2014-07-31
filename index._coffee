@@ -99,6 +99,7 @@ class TranslatableFile extends StringsFile
 class AndroidXmlFile extends TranslatableFile
   constructor: (@path) ->
     @name = Path.basename(@path)
+    @longerName = Path.join(Path.basename(Path.dirname(@path)), @name)
     @entries = []
     @entriesByKey = {}
     @terms = []
@@ -194,7 +195,9 @@ class iOSStringsFileCluster
 
 class iOSStringsFile extends TranslatableFile
   constructor: (@cluster, @path, @lang) ->
+    @baseFile = @cluster.baseFile
     @name = Path.basename(@path)
+    @longerName = Path.join(Path.basename(Path.dirname(@path)), @name)
     @entries = []
     @entriesByKey = {}
     @terms = []
@@ -232,24 +235,29 @@ class iOSStringsFile extends TranslatableFile
     return @entriesByKey[key]
 
 
-  writeLocalized: (localizedPath, _) ->
+  write: (_) ->
     entriesByKey = {}
     for entry in @entries
       entriesByKey[entry.key] = entry
 
     strings = []
-    for entry in @entries when entry.translatedString
-      escaped = stringsEscape(entry.translatedString)
+    for baseEntry in @baseFile.entries
+      if @entriesByKey.hasOwnProperty(baseEntry.key)
+        entry = @entriesByKey[baseEntry.key]
 
-      strings.push "\"#{stringsEscape(entry.key)}\" = \"#{escaped}\";\n"
+        if translatedEntry = entry.getTranslatedEntry()
+          if baseEntry.comment
+            strings.push "/* #{baseEntry.comment} */\n"
+          strings.push "\"#{stringsEscape(baseEntry.key)}\" = \"#{stringsEscape(translatedEntry.value)}\";\n"
+          strings.push "\n"
 
     body = strings.join('')
 
-    outputDir = Path.dirname(localizedPath)
+    outputDir = Path.dirname(@path)
     if !existsAsync(outputDir, _)
       fs.mkdir(outputDir, _)
 
-    fs.writeFile(localizedPath, body, _)
+    fs.writeFile(@path, body, _)
 
 
 class StringEntry
@@ -428,7 +436,7 @@ class Processor
     console.log("\nLoading localization files")
     for cluster in @localizableFileClusters
       for file in cluster.files
-        console.log("  %s (%s)", file.name, file.lang)
+        console.log("  %s", file.longerName)
         file.read(_)
         file.updateStatistics()
         console.log("    %d words in %d entries", file.wordCount, file.entryCount)
@@ -484,7 +492,7 @@ class Processor
         console.log("    %s", file.name)
         console.log("      previously translated: %d total, %d no longer relevant, %d retranslated", file.previouslyTranslatedEntryCount, file.unmatchedEntryCount, file.gengoRetranslatedEntryCount)
         console.log("      Gengo: %d incoming, of those %d new, %d changed, %d same", file.gengoTranslatedEntryCount, file.gengoNewlyTranslatedEntryCount, file.gengoRetranslatedEntryCount, file.gengoMatchedEntryCount)
-        console.log("      now: %d translated, %d untranslated", file.translatedEntryCount, file.untranslatedEntryCount)
+        console.log("      now: %d translated, %d modified, %d untranslated", file.translatedEntryCount, file.gengoModifiedEntryCount, file.untranslatedEntryCount)
 
       untranslatedEntries = []
       for baseEntry in baseEntries
@@ -497,9 +505,9 @@ class Processor
       @untranslatedEntriesByLang[lang] = untranslatedEntries
 
 
-  exportStringsInLanguages: (template, langs, options, _) ->
+  exportStrings: (_) ->
     console.log("\nWriting Gengo files")
-    for lang in langs
+    for lang in @langs
       console.log("  %s", lang)
 
       gengoFile = @gengoCluster.filesByLang[lang]
@@ -508,26 +516,14 @@ class Processor
       console.log("    %s - %d entries", outgoingFile.name, outgoingFile.entries.length)
       outgoingFile.write(_)
 
-  importStrings: (file, lang, options, _) ->
-    console.log("importStrings %s", lang)
-    console.log("importStrings @localizableFileClusters = %s", @localizableFileClusters.length)
-    for file in @localizableFileClusters
-      localizedPath = file.localizedPath(lang)
-      console.log("Writing %s", localizedPath)
-      file.writeLocalized(localizedPath, _)
 
-  importStringsInLanguages: (template, langs, options, _) ->
-    for lang in langs
-      console.log("%s:", lang)
-      file = template.replace(/XX/g, lang)
-      @importStrings(file, lang, options, _)
-
-  loadTranslatedStringsInLanguages: (template, langs, options, _) ->
-    console.log("\nLoading Gengo files")
-    for lang in langs
-      file = template.replace(/XX/g, lang)
-      console.log("  %s (%s)", Path.basename(file), lang)
-      @loadTranslatedStrings(file, lang, options, _)
+  importStrings: (_) ->
+    console.log("\nWriting strings files")
+    for cluster in @localizableFileClusters
+      console.log("  %s", cluster.name)
+      for file in cluster.localizedFiles
+        console.log("    %s", file.longerName)
+        file.write(_)
 
 
 run = (_) ->
@@ -552,9 +548,9 @@ run = (_) ->
   processor.matchStrings()
 
   if options.export
-    processor.exportStringsInLanguages(options.textFileTemplate, langs, options, _)
+    processor.exportStrings(_)
   else if options.import
-    processor.importStringsInLanguages(options.textFileTemplate, langs, options, _)
+    processor.importStrings(_)
 
 run (err) ->
   throw err if err
