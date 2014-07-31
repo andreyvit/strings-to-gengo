@@ -46,6 +46,16 @@ IMPORTANT: Please use the following standard translations of common Android term
 ]]]
 """
 
+PREFIX = """
+[[[ NOTE: You're translating user inferface strings for an iPhone app. ]]]
+[[[ IMPORTANT: The results of this translation will be processed automatically. ]]]
+[[[ IMPORTANT: 1. Please translate entries inline, keeping the comments. ]]]
+[[[ IMPORTANT: 2. Please don't reorder or remove entries. ]]]
+[[[ IMPORTANT: 3. Please keep the capitalization of the original string, unless you have good reasons to do otherwise. ]]]
+[[[ IMPORTANT: 4. Please don't translate our brand names (Ascendo, VidaLingua, VidaLingua Dictionary, Dictionary+). ]]]
+[[[ IMPORTANT: 5. Some strings contain substitution keys like %2$d — please keep them intact, but put them in the proper place. ]]]
+"""
+
 IOS_STRINGS_REGEXP = ///
   (                          # group 1: comments
     (?:
