@@ -73,6 +73,11 @@ IOS_COMMENT_REGEXP = ///
   /\* ([^⇆]*?) \*/
 ///g
 
+STUPID_COMMENTS = [
+  'No comment provided by engineer.'
+  'AFNetworking'
+]
+
 
 class StringsFile
 
@@ -262,6 +267,10 @@ class iOSStringsFile extends TranslatableFile
 
 class StringEntry
   constructor: (@file, @key, @value, @comment='') ->
+    @comment = @comment.trim()
+    if STUPID_COMMENTS.indexOf(@comment) >= 0
+      @comment = ''
+
     @value = @value.replace(/\\'/g, "'")
     @value = @value.replace(/\\n\n/g, "\n")
     @value = @value.replace(/\\n\\n\n\n/g, "\n\n")
@@ -377,9 +386,15 @@ class OutgoingGengoFile extends StringsFile
   write: (_) ->
     # filter = ///#{options.vocabularyFilter}///i
 
-    allEntryLines =
-      for entry in @entries
-        "[[[ key: #{entry.key} ]]]\n[[[ English: #{entry.shortValue} ]]]\n#{entry.value}"
+    sections = []
+
+    for entry in @entries
+      lines = []
+      lines.push "[[[ key: #{entry.key} ]]]\n"
+      # lines.push "[[[ English: #{entry.shortValue} ]]]\n" if entry.value != entry.key
+      lines.push "[[[ Comment: #{entry.comment} ]]]\n" if entry.comment
+      lines.push "#{entry.value}\n"
+      sections.push lines.join('').trim()
 
     # # vocabTerms = []
     # # vocabHash = {}
@@ -395,7 +410,7 @@ class OutgoingGengoFile extends StringsFile
     #   vocabLines.push(line)
     #   console.log "  %s", line
 
-    text = [PREFIX].concat(allEntryLines).join("\n\n") + "\n"
+    text = [PREFIX].concat(sections).join("\n\n") + "\n"
     text = text.replace('<vocab>', vocabLines.join("\n"))
     fs.writeFile(@path, text, _)
 
