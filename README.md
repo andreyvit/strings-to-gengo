@@ -1,3 +1,6 @@
+
+[![Greenkeeper badge](https://badges.greenkeeper.io/andreyvit/strings-to-gengo.svg)](https://greenkeeper.io/)
+
 Example:
 
     _coffee index._coffee --text ~/somewhere/gengo/gengo-XX.txt --ios-strings ~/dev/myapp/Localization/en.lproj/Localizable.strings --langs es,fr,it,de,pt --import
